@@ -106,26 +106,10 @@ class SmsSent {
 
       if (smsProvider[0].SMSProvider === "AirTel") {
         payload = {
-          keyword: "Nil",
-          timeStamp: "",
-          dataSet: [
-            {
-              UNIQUE_ID: "Nil",
-              MESSAGE: messagesDetails.smsTxt,
-              OA: "AABHVN",
-              MSISDN: messagesDetails.smsMobile,
-              CHANNEL: "SMS",
-              CAMPAIGN_NAME: messagesDetails.CAMPAIGN_NAME,
-              CIRCLE_NAME: messagesDetails.CIRCLE_NAME,
-              USER_NAME: messagesDetails.USR_NAME,
-              DLT_TM_ID: messagesDetails.DLT_TM_ID,
-              DLT_CT_ID: messagesDetails.dltContentId,
-              DLT_PE_ID: messagesDetails.dltPrincipalEntityId,
-            },
-          ],
+          //airtel api payload
         };
         const response = await fetch(
-          "http://digimate.airtel.in:15181/BULK_API/InstantJsonPush",
+          "airtel api urls",
           {
             method: "POST",
             ...this.getBaseRequestConfig(),
@@ -143,20 +127,11 @@ class SmsSent {
         return SmsApiDatas;
       } else if (smsProvider[0].SMSProvider === "SmartPing") {
         payload = {
-          extra: {
-            dltContentId: messagesDetails.dltContentId,
-            dltPrincipalEntityId: messagesDetails.dltPrincipalEntityId,
-          },
-          message: {
-            recipient: messagesDetails.smsMobile,
-            text: messagesDetails.smsTxt,
-          },
-          sender: messagesDetails.SenderName,
-          unicode: "false",
+         //Smartping api payload
         };
 
         const response = await fetch(
-          "https://api.smartping.ai/fe/api/v1/message",
+          "smartping api url",
           {
             method: "POST",
             ...this.getBaseRequestConfig(),
@@ -182,7 +157,7 @@ class SmsSent {
     try {
       const fetchBody = JSON.stringify(requestBody);
       const response = await fetch(
-        "https://aaberp.aabsweets.com:9001/api/approvalReqFour",
+        //"api for fecth the data from ",
         {
           method: "POST",
           ...this.getBaseRequestConfig(),
