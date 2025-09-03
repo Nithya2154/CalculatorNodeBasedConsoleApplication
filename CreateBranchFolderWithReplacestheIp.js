@@ -1,0 +1,424 @@
+const httpMsgs = require('../core/httpMsgs');
+var request = require('request');
+const https = require('https');
+const fs = require('fs').promises; // for async fs functions like readFile
+const fsa = require('fs');          // for sync functions like existsSync, createWriteStream
+const fsExtra = require('fs-extra'); // for copy
+const path = require('path');
+
+//Block start
+exports.branchCloudFolderCreation = function (mySid, req, resp, reqBody) {
+    try {
+        if (!reqBody) throw new Error("Input not valid");
+        //reqBody = reqBody.replace(/'/g, '');
+        var payload = JSON.parse(reqBody);
+        const frmnetworkmasterobject = new FrmNetworkMaster(payload, payload.OrderNo)
+        frmnetworkmasterobject.APIGetApprovalNgFour(payload, payload.OrderNo)
+        // if (data) {
+        return httpMsgs.sendJson(req, resp, [{ Result: 'Success' }]);
+        // }
+        // else {
+        //     throw new Error("Input not valid");
+        // }
+
+    }
+    catch (ex) {
+        httpMsgs.show500(req, resp, ex);
+    }
+};
+//Block End
+
+
+class FrmNetworkMaster {
+
+    // Asynchronous function to create a branch-specific folder and copy WebServer files into it
+    async BranchFolderCreation(varLiveMnl, apiData) {
+        try {
+            let SourceWebServerPath = "", VarbrFolder = "", DestinationWebServerPath = "";
+
+            // Decide the source and target folder paths based on whether the process is for "Live" or "Manual"
+            if (varLiveMnl === 'Live') {
+                // Source folder where WebServer files are stored for live environment
+                SourceWebServerPath = apiData.Live_SourceWebServerPath;
+
+                // Destination path for the live branch's Varbr folder (e.g., .../Live/BranchName)
+                VarbrFolder = path.join(apiData.Live_VarbrFolder, apiData.brname);
+            } else {
+                // Source folder where WebServer files are stored for manual billing environment
+                SourceWebServerPath = apiData.ManualBill_SourceWebServerPath;
+
+                // Destination path for the manual branch's Varbr folder
+                VarbrFolder = path.join(apiData.ManualBill_DestinationWebServerPath, apiData.brname);
+            }
+
+            // Check if the destination folder (VarbrFolder) already exists
+            if (!fsa.existsSync(VarbrFolder)) {
+                // If it doesn't exist, create it recursively (i.e., along with parent folders if needed)
+                fsa.mkdirSync(VarbrFolder, { recursive: true });
+                console.log(`Directory created: ${VarbrFolder}`);
+            } else {
+                // If it already exists, log a message
+                console.log(`Directory already exists: ${VarbrFolder}`);
+            }
+
+            // Set the final destination path for the WebServer files under a "Cloud" subfolder
+            DestinationWebServerPath = path.join(VarbrFolder, "Cloud");
+
+            // Copy all files and subfolders from the source WebServer folder to the destination Cloud folder
+            await fsExtra.copy(SourceWebServerPath, DestinationWebServerPath);
+            console.log(`Folder copied from ${SourceWebServerPath} to ${DestinationWebServerPath}`);
+        } catch (err) {
+            // Log any error that occurs during folder creation or file copying
+            console.error('Error copying folder:', err);
+        }
+    }
+
+
+    // Asynchronous function to replace IP addresses and other dynamic values inside a `gnode.js` file
+    async ReplaceIpInGNODEJS(varLiveMnl, apiData) {
+        try {
+            let filePath = "";
+
+            // Determine the path to the existing gnode.js file based on whether it's "Live" or "Manual"
+            if (varLiveMnl === "Live") {
+                filePath = path.join(apiData.Live_VarbrFolder, "NodeRunning", "gnode.js");
+            } else {
+                filePath = path.join(apiData.ManualBill_DestinationWebServerPath, "NodeRunning", "gnode.js");
+            }
+
+            // Read the contents of the original gnode.js file as a UTF-8 string
+            const myStr = await fs.readFile(filePath, 'utf8');
+
+            // Construct the new application server IP with port
+            const AppServerIp = `https://${apiData.AppServerIp}:${apiData.AppServerApiPort}`;
+
+            // Extract other replacement values from apiData
+            const selDwp = apiData.dwp;
+            const seldbusr = apiData.dbusr;
+
+            // Declare variables to be set depending on Live or Manual
+            let dbName = "", Ip_Db = "", SourceNodeServerPath = "";
+
+            // Set DB name, DB IP, and destination path for the updated gnode.js file
+            if (varLiveMnl === "Live") {
+                dbName = apiData.db;
+                Ip_Db = apiData.Ip_Db;
+                SourceNodeServerPath = path.join(apiData.Live_VarbrFolder, apiData.brname, "Cloud", "NodeServer", "gnode.js");
+            } else {
+                dbName = apiData.secondaryDbName;
+                Ip_Db = apiData.secondaryDbIp;
+                SourceNodeServerPath = path.join(apiData.ManualBill_DestinationWebServerPath, apiData.brname, "Cloud", "NodeServer", "gnode.js");
+            }
+
+            // Replace old hardcoded DB IP with new IP
+            let brwiseStr = myStr.replace(/10\.20\.209\.20/g, Ip_Db);
+
+            // Replace hardcoded App Server IP and port with dynamic value
+            brwiseStr = brwiseStr.replace(/https:\/\/10\.20\.209\.20:9000/g, AppServerIp);
+
+            // Replace hardcoded DB name (sairam) with branch-specific value
+            brwiseStr = brwiseStr.replace(/sairam/g, selDwp);
+
+            // Replace database username from "sa" to selected username
+            brwiseStr = brwiseStr.replace(/"sa"/g, `"${seldbusr}"`);
+
+            // Only for "Live", replace "Zales" with actual DB name
+            if (varLiveMnl === "Live") {
+                brwiseStr = brwiseStr.replace(/Zales/g, dbName);
+            }
+
+            // Replace the web port definition (e.g., e.webPort=9000) with the actual port
+            const changeWebport = `e.webPort=${apiData.AppServerApiPort}`;
+            brwiseStr = brwiseStr.replace(/e\.webPort=\d+/g, changeWebport);
+
+            // Ensure the destination directory exists before writing the file
+            const dirPath = path.dirname(SourceNodeServerPath);
+            await fs.mkdir(dirPath, { recursive: true });
+
+            // Create a write stream to save the updated gnode.js content
+            const writeStream = fsa.createWriteStream(SourceNodeServerPath, { flags: 'w' });
+
+            // Write the modified string to the new gnode.js file
+            writeStream.write(brwiseStr + '\n');
+
+            // Finalize and close the write stream
+            writeStream.end();
+
+            console.log(`Updated gnode.js saved at ${SourceNodeServerPath}`);
+        } catch (err) {
+            console.error('Error in ReplaceIpInGNODEJS:', err);
+        }
+    }
+
+    // Async function to update the contents of S1.js with dynamic IP, port, DB name, etc.
+    async ReplaceIpInS1JS(varLiveMnl, apiData) {
+        try {
+            let myStreamReaderL1 = "";
+
+            // Determine the correct source S1.js file path depending on "Live" or "Manual"
+            if (varLiveMnl === "Live") {
+                myStreamReaderL1 = apiData.Live_myStreamReaderL1; // Path to source S1.js for live
+            } else {
+                myStreamReaderL1 = apiData.ManualBill_myStreamReaderL1; // Path to source S1.js for manual
+            }
+
+            // Read the original S1.js file content as UTF-8 string
+            const myStr = await fs.readFile(myStreamReaderL1, 'utf8');
+            console.log("Original S1.js content loaded");
+
+            // Get the SQL web port (default to 9000 if not provided)
+            let seldbWebport = apiData.SqlWebPort || '9000';
+
+            // Declare variables for DB name, IP, and output path
+            let dbName = "", Ip_Db = "", SourceNodeServerPath = "";
+
+            // Construct the full application server URL with port
+            apiData.AppServerIp = `https://${apiData.AppServerIp}:${apiData.AppServerApiPort}`;
+
+            // Set the DB name, IP, and destination file path based on Live/Manual
+            if (varLiveMnl === "Live") {
+                dbName = apiData.db;
+                Ip_Db = apiData.Ip_Db;
+                SourceNodeServerPath = path.join(
+                    apiData.Live_VarbrFolder,
+                    apiData.brname,
+                    "Cloud",
+                    "NodeServer",
+                    "S1.js"
+                );
+            } else {
+                dbName = apiData.secondaryDbName;
+                Ip_Db = apiData.secondaryDbIp;
+                SourceNodeServerPath = path.join(
+                    apiData.ManualBill_DestinationWebServerPath,
+                    apiData.brname,
+                    "Cloud",
+                    "NodeServer",
+                    "S1.js"
+                );
+            }
+
+            // Start replacing values inside the S1.js file string
+            let brwiseStr = myStr.replace(/10\.20\.209\.20/g, Ip_Db); // Replace old DB IP with new one
+            brwiseStr = brwiseStr.replace(/https:\/\/10\.20\.209\.20:9000/g, apiData.AppServerIp); // Replace App Server URL
+            brwiseStr = brwiseStr.replace(/sairam/g, apiData.dwp); // Replace hardcoded DB name with branch-specific value
+            brwiseStr = brwiseStr.replace(/Zales/g, dbName); // Replace placeholder DB name
+            brwiseStr = brwiseStr.replace(/"sa"/g, `"${apiData.dbUser}"`); // Replace DB username from "sa" to actual user
+
+            // Replace web port assignment (e.g., e.webPort=9000)
+            const changeWebport = `e.webPort=${seldbWebport}`;
+            brwiseStr = brwiseStr.replace(/e\.webPort=\d+/g, changeWebport);
+
+            // Ensure destination directory exists before writing the updated S1.js
+            const dirPath = path.dirname(SourceNodeServerPath);
+            await fs.mkdir(dirPath, { recursive: true });
+
+            // Create a writable stream to the destination file and write the modified content
+            const myStream = fsa.createWriteStream(SourceNodeServerPath, { flags: 'w' });
+            myStream.write(brwiseStr + '\n'); // Write updated content
+            myStream.end(); // Close the stream
+
+            // Log confirmation message
+            console.log(`S1.js file updated and saved at ${SourceNodeServerPath}`);
+        } catch (err) {
+            // Catch and log any errors encountered during the process
+            console.error('Error in ReplaceIpInS1JS:', err);
+        }
+    }
+
+    // Function to find a 'main.*.js' file from the Manual Bill WebServer output
+    findMainJsFromManualBill(apiData) {
+        // Construct the directory path where Angular build files are located for manual bill
+        const dirPath = path.join(
+            apiData.ManualBill_DestinationWebServerPath,
+            "NodeRunning",
+            "Ng"
+        );
+
+        // Read all filenames in the target directory
+        const files = fsa.readdirSync(dirPath);
+
+        // Search for a file that matches the pattern: main.<hash>.js (e.g., main.23fd1d.js)
+        const match = files.find(f => /^main\..*\.js$/.test(f));
+
+        // Return the matched filename, or "0" if not found
+        return match || "0";
+    }
+
+
+
+    // Function to find a specific chunk JS file (chunk-KL54PALN.*.js) from the Live WebServer build
+    findChunkJsFromLive(apiData) {
+        // Construct the directory path where Angular chunk files are stored for live environment
+        const dirPath = path.join(
+            apiData.Live_VarbrFolder,
+            "NodeRunning",
+            "Ng"
+        );
+
+        // Read all filenames in the directory
+        const files = fsa.readdirSync(dirPath);
+
+        // Search for a file that matches the pattern: chunk-KL54PALN.<hash>.js
+        const pattern = new RegExp(`^${apiData.NgMainFileChunkName}\\.js$`);
+        const match = files.find(f => pattern.test(f));
+
+
+        // Return the matched filename, or "0" if not found
+        return match || "0";
+    }
+
+    // Async function to replace the IP address inside an Angular build file (main.*.js or chunk-KL54PALN.*.js)
+    // and copy the full Angular build folder to the Cloud/WebServer folder for a specific branch.
+    async ReplaceIpofMainFileNgVersionII(varLiveMnl, apiData) {
+        let Vmaifilees5 = "";                  // Will hold the Angular build filename (e.g., main.abc123.js)
+        let SourceWebServerPath = "";         // Path to the original Angular build folder
+        let SourceNodeServerPathEs5 = "";     // Path to where the specific file will be written
+        let Ip_Db = "";                       // The IP address to insert
+        let DestinationWebServerPath = "";    // Path where the build folder will be copied to
+        let filePathEs5 = "";                 // Full path to the file to be read and modified
+
+        // Choose which file to look for based on "Live" or "Manual" mode
+        if (varLiveMnl === "Live") {
+            Vmaifilees5 = this.findChunkJsFromLive(apiData); // Looks for chunk-KL54PALN.*.js
+        } else {
+            Vmaifilees5 = this.findMainJsFromManualBill(apiData); // Looks for main.*.js
+        }
+
+
+        // If no matching file is found, exit early
+        if (Vmaifilees5 === "0") {
+            console.log("Sorry, no file found"); // Consider showing a GUI alert here
+            return;
+        }
+
+        // Set file paths based on "Live" or "Manual" mode
+        if (varLiveMnl === "Live") {
+            filePathEs5 = path.join(apiData.Live_VarbrFolder, "NodeRunning", "Ng", Vmaifilees5);
+            SourceWebServerPath = path.join(apiData.Live_VarbrFolder, "NodeRunning", "Ng");
+        } else {
+            filePathEs5 = path.join(apiData.ManualBill_DestinationWebServerPath, "NodeRunning", "Ng", Vmaifilees5);
+            SourceWebServerPath = path.join(apiData.ManualBill_DestinationWebServerPath, "NodeRunning", "Ng");
+        }
+
+        let myStrEs5 = "";
+        try {
+            // Read the content of the target Angular build file
+            myStrEs5 = await fs.readFile(filePathEs5, 'utf8');
+            console.log("File content loaded successfully.");
+        } catch (err) {
+            console.error("Error reading the ES5 file:", err.message);
+            return; // Exit if reading failed
+        }
+
+        // Set IP and destination paths depending on environment
+        if (varLiveMnl === "Live") {
+            Ip_Db = apiData.AppServerIp; // IP of the live app server
+
+            // Destination: live branch's Cloud/WebServer folder
+            SourceNodeServerPathEs5 = path.join(apiData.Live_VarbrFolder, apiData.brname, "Cloud", "WebServer", Vmaifilees5);
+            DestinationWebServerPath = path.join(apiData.Live_VarbrFolder, apiData.brname, "Cloud", "WebServer");
+        } else {
+            Ip_Db = apiData.secondaryDbIp; // IP of the secondary DB server (manual)
+
+            // Destination: manual branch's Cloud/WebServer folder
+            SourceNodeServerPathEs5 = path.join(apiData.ManualBill_DestinationWebServerPath, apiData.brname, "Cloud", "WebServer", Vmaifilees5);
+            DestinationWebServerPath = path.join(apiData.ManualBill_DestinationWebServerPath, apiData.brname, "Cloud", "WebServer");
+        }
+
+        try {
+            // Optionally remove the destination folder first (disabled currently)
+            // await fsa.remove(DestinationWebServerPath);
+
+            // Copy all files from the Angular build folder to the destination WebServer folder
+            await fsExtra.copy(SourceWebServerPath, DestinationWebServerPath, { overwrite: true });
+
+            // Replace the hardcoded IP with the new IP and port in the JS file content
+            const newIp = `https://${Ip_Db}:${apiData.AppServerApiPort}`;
+            const brwiseStrEs5 = myStrEs5.replace(/https:\/\/10\.20\.209\.20:9000/g, newIp);
+
+            // Write the updated content to the copied JS file in the WebServer folder
+            await fs.promises.writeFile(SourceNodeServerPathEs5, brwiseStrEs5 + '\n', 'utf8');
+
+            console.log('Folder copied and file updated successfully');
+        } catch (err) {
+            console.error('Error in copyFolderAndReplaceIp:', err.message);
+            // Additional error handling (e.g., cleanup) could go here
+        }
+    }
+
+    getBaseRequestConfig() {
+        return {
+            headers: {
+                "x-api-key":
+                    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJfZ2tleSI6IkJSTEdOfk5pdGh5YW5hbnRoYW1Ac3dkIiwiaWF0IjoxNzU2Nzg4NTkxLCJleHAiOjE3NTY4ODg1OTF9.EzQWh5cQHNXuA-P-2H--AdYRACyVkUHR0VBcHB6sTNc",
+                "content-type": "application/json"
+            },
+            strictSSL: false,
+            timeout: 30000, // 30 second timeout
+        };
+    }
+    async APIGetApprovalNgFour(ReqPayload, LiveOrManual) {
+        try {
+            const response = await fetch(
+                "https://staging.aabsweets.com:9001/api/approvalReqFour",
+                {
+                    method: "POST",
+                    ...this.getBaseRequestConfig(),
+                    body: JSON.stringify(ReqPayload),
+                }
+            );
+            // Check for non-200 response
+            if (!response.ok) {
+                throw new Error(`Request failed with status ${response.status}`);
+            }
+            const appReqFourDatas = await response.json();
+            if (!Array.isArray(appReqFourDatas)) {
+                throw new Error("Invalid response format: Expected an array");
+            }
+
+            for (let apiData of appReqFourDatas) {
+                if (apiData.UpdateType === 'FullUpdate') {
+                    // 1. Create branch folder structure
+                    await this.BranchFolderCreation(LiveOrManual, apiData);
+
+                    // 2. Replace IP in gnode.js
+                    await this.ReplaceIpInGNODEJS(LiveOrManual, apiData);
+
+                    // 3. Replace IP in S1.js (only for Live mode)
+                    if (LiveOrManual === 'Live') {
+                        await this.ReplaceIpInS1JS(LiveOrManual, apiData);
+                    }
+
+                    // 4. Replace IP and port in Angular build JS file (main.js or chunk)
+                    await this.ReplaceIpofMainFileNgVersionII(LiveOrManual, apiData);
+                }
+
+                else if (apiData.UpdateType === 'gnode') {
+                    // Only replace IP in gnode.js
+                    await this.ReplaceIpInGNODEJS(LiveOrManual, apiData);
+                }
+
+                else if (apiData.UpdateType === 'S1') {
+                    // Only replace IP in S1.js (only for Live mode)
+                    if (LiveOrManual === 'Live') {
+                        await this.ReplaceIpInS1JS(LiveOrManual, apiData);
+                    }
+                }
+
+                else if (apiData.UpdateType === 'Angular') {
+                    // Only replace IP and port in Angular build file
+                    await this.ReplaceIpofMainFileNgVersionII(LiveOrManual, apiData);
+                }
+
+            }
+            // console.log(appReqFourDatas)
+
+            return appReqFourDatas;
+        } catch (error) {
+            console.error("Error in main function:", error.message);
+            return { error: error.message };
+        }
+    }
+}
+
